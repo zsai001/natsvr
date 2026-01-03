@@ -38,11 +38,13 @@ type ForwardRuleState struct {
 
 // TunnelConn represents an active tunnel connection
 type TunnelConn struct {
-	ID       uint32
-	AgentID  string
-	Conn     net.Conn
-	Protocol string
-	Target   string
+	ID            uint32
+	AgentID       string
+	Conn          net.Conn
+	Protocol      string
+	Target        string
+	SourceAgentID string // For P2P tunnels, the source agent ID
+	LocalTunnelID uint32 // For P2P tunnels, the source agent's local tunnel ID
 }
 
 // NewForwarder creates a new forwarder
@@ -147,7 +149,20 @@ func (f *Forwarder) StartRule(rule *ForwardRule) error {
 			go f.handleCloudSelfUDPListener(state)
 		}
 	case "local", "p2p":
-		// Agent to agent forwarding - handled when agents connect
+		// Agent to agent forwarding - notify source agent to start listening
+		if rule.SourceAgentID != "" {
+			// Try to find source agent by name first, then by ID
+			sourceAgent := f.server.GetAgentByName(rule.SourceAgentID)
+			if sourceAgent == nil {
+				sourceAgent = f.server.GetAgent(rule.SourceAgentID)
+			}
+			if sourceAgent != nil {
+				log.Printf("Sending local proxy rule %s to source agent %s", rule.Name, sourceAgent.Name)
+				f.sendLocalProxyStart(sourceAgent, rule)
+			} else {
+				log.Printf("Source agent %s not connected, rule will be sent when agent connects", rule.SourceAgentID)
+			}
+		}
 	}
 
 	f.rules[rule.ID] = state
@@ -161,10 +176,9 @@ func (f *Forwarder) StartRule(rule *ForwardRule) error {
 // StopRule stops a forwarding rule
 func (f *Forwarder) StopRule(ruleID string) error {
 	f.rulesMu.Lock()
-	defer f.rulesMu.Unlock()
-
 	state, exists := f.rules[ruleID]
 	if !exists {
+		f.rulesMu.Unlock()
 		return nil
 	}
 
@@ -180,8 +194,22 @@ func (f *Forwarder) StopRule(ruleID string) error {
 	trafficUsed := atomic.LoadInt64(&state.TrafficUsed)
 	f.server.store.UpdateTrafficUsed(ruleID, trafficUsed)
 
+	rule := state.Rule
 	delete(f.rules, ruleID)
-	log.Printf("Stopped forward rule: %s", state.Rule.Name)
+	f.rulesMu.Unlock()
+
+	// For local/p2p rules, notify source agent to stop
+	if (rule.Type == "local" || rule.Type == "p2p") && rule.SourceAgentID != "" {
+		sourceAgent := f.server.GetAgentByName(rule.SourceAgentID)
+		if sourceAgent == nil {
+			sourceAgent = f.server.GetAgent(rule.SourceAgentID)
+		}
+		if sourceAgent != nil {
+			f.sendLocalProxyStop(sourceAgent, ruleID)
+		}
+	}
+
+	log.Printf("Stopped forward rule: %s", rule.Name)
 
 	return nil
 }
@@ -523,6 +551,13 @@ func (f *Forwarder) HandleData(agent *AgentConn, msg *protocol.Message) {
 		return
 	}
 
+	// Check if this is a P2P tunnel (no local connection, forward to source agent)
+	if tunnelConn.Conn == nil {
+		// This is P2P data from target agent, forward to source agent
+		f.HandleP2PDataReverse(agent, msg.TunnelID, msg.Payload)
+		return
+	}
+
 	_, err := tunnelConn.Conn.Write(msg.Payload)
 	if err != nil {
 		tunnelConn.Conn.Close()
@@ -558,15 +593,21 @@ func (f *Forwarder) HandleICMPData(agent *AgentConn, msg *protocol.Message) {
 func (f *Forwarder) HandleConnectAck(agent *AgentConn, msg *protocol.Message) {
 	ack, err := protocol.DecodeConnectAckPayload(msg.Payload)
 	if err != nil {
+		log.Printf("HandleConnectAck: failed to decode payload: %v", err)
 		return
 	}
+
+	log.Printf("HandleConnectAck: from agent %s, tunnelID=%d, success=%v", agent.ID, msg.TunnelID, ack.Success)
 
 	f.pendingMu.Lock()
 	ch, exists := f.pendingAcks[msg.TunnelID]
 	f.pendingMu.Unlock()
 
 	if exists {
+		log.Printf("HandleConnectAck: found pending channel for tunnelID=%d, sending ack", msg.TunnelID)
 		ch <- ack
+	} else {
+		log.Printf("HandleConnectAck: no pending channel for tunnelID=%d", msg.TunnelID)
 	}
 }
 
@@ -575,8 +616,12 @@ func (f *Forwarder) HandleClose(agent *AgentConn, msg *protocol.Message) {
 	f.tunnelConnMu.Lock()
 	tunnelConn, exists := f.tunnelConns[msg.TunnelID]
 	if exists {
-		tunnelConn.Conn.Close()
+		// Only close Conn if it's not nil (P2P tunnels don't have a local Conn)
+		if tunnelConn.Conn != nil {
+			tunnelConn.Conn.Close()
+		}
 		delete(f.tunnelConns, msg.TunnelID)
+		log.Printf("Tunnel %d closed by agent %s", msg.TunnelID, agent.ID)
 	}
 	f.tunnelConnMu.Unlock()
 
@@ -604,5 +649,236 @@ func (f *Forwarder) SendToAgent(agentID string, msg *protocol.Message) error {
 	defer agent.writeMu.Unlock()
 
 	return agent.Conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// sendLocalProxyStart sends a local proxy start message to an agent
+func (f *Forwarder) sendLocalProxyStart(agent *AgentConn, rule *ForwardRule) error {
+	payload := protocol.EncodeLocalProxyStartPayload(&protocol.LocalProxyStartPayload{
+		RuleID:        rule.ID,
+		Protocol:      rule.Protocol,
+		ListenPort:    uint16(rule.ListenPort),
+		TargetAgentID: rule.TargetAgentID,
+		TargetHost:    rule.TargetHost,
+		TargetPort:    uint16(rule.TargetPort),
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeLocalProxyStart, 0, payload)
+	return f.server.sendToAgent(agent, msg)
+}
+
+// sendLocalProxyStop sends a local proxy stop message to an agent
+func (f *Forwarder) sendLocalProxyStop(agent *AgentConn, ruleID string) error {
+	payload := protocol.EncodeLocalProxyStopPayload(&protocol.LocalProxyStopPayload{
+		RuleID: ruleID,
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeLocalProxyStop, 0, payload)
+	return f.server.sendToAgent(agent, msg)
+}
+
+// OnAgentConnected is called when an agent connects, to send it local proxy rules
+func (f *Forwarder) OnAgentConnected(agent *AgentConn) {
+	rules, err := f.server.store.GetForwardRules()
+	if err != nil {
+		log.Printf("Failed to load forward rules for agent %s: %v", agent.ID, err)
+		return
+	}
+
+	for _, rule := range rules {
+		if !rule.Enabled || (rule.Type != "local" && rule.Type != "p2p") {
+			continue
+		}
+
+		// Match by ID or by name
+		if rule.SourceAgentID == agent.ID || rule.SourceAgentID == agent.Name {
+			log.Printf("Sending local proxy rule %s to agent %s (%s)", rule.Name, agent.Name, agent.ID)
+			if err := f.sendLocalProxyStart(agent, rule); err != nil {
+				log.Printf("Failed to send local proxy start to agent %s: %v", agent.ID, err)
+			}
+		}
+	}
+}
+
+// HandleP2PConnect handles P2P connection request from source agent
+func (f *Forwarder) HandleP2PConnect(sourceAgent *AgentConn, msg *protocol.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in HandleP2PConnect: %v", r)
+		}
+	}()
+
+	payload, err := protocol.DecodeP2PConnectPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode P2P connect payload: %v", err)
+		return
+	}
+
+	localTunnelID := msg.TunnelID // Source agent's local tunnel ID
+
+	log.Printf("P2P connect request from agent %s: target=%s, dest=%s:%d, localTunnelID=%d",
+		sourceAgent.ID, payload.SourceAgentID, payload.TargetHost, payload.TargetPort, localTunnelID)
+
+	// Find the target agent by name
+	targetAgent := f.server.GetAgentByName(payload.SourceAgentID)
+	if targetAgent == nil {
+		// Try by ID
+		targetAgent = f.server.GetAgent(payload.SourceAgentID)
+	}
+	if targetAgent == nil {
+		log.Printf("P2P connect: target agent %s not found (not connected)", payload.SourceAgentID)
+		// Send failure ack with the local tunnel ID so source can find its pending channel
+		ackPayload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+			Success:  false,
+			TunnelID: localTunnelID,
+			Error:    "Target agent not connected",
+		})
+		ackMsg := protocol.NewMessage(protocol.MsgTypeP2PConnectAck, localTunnelID, ackPayload)
+		f.server.sendToAgent(sourceAgent, ackMsg)
+		return
+	}
+
+	log.Printf("P2P connect: found target agent %s (%s)", targetAgent.Name, targetAgent.ID)
+
+	// Generate global tunnel ID (unique across all tunnel types)
+	globalTunnelID := atomic.AddUint32(&f.tunnelIDGen, 1)
+
+	// Create pending ack channel with global tunnel ID
+	ackChan := make(chan *protocol.ConnectAckPayload, 1)
+	f.pendingMu.Lock()
+	f.pendingAcks[globalTunnelID] = ackChan
+	log.Printf("P2P connect: created pending ack channel for globalTunnelID=%d", globalTunnelID)
+	f.pendingMu.Unlock()
+
+	defer func() {
+		f.pendingMu.Lock()
+		delete(f.pendingAcks, globalTunnelID)
+		f.pendingMu.Unlock()
+	}()
+
+	// Forward connect request to target agent with global tunnel ID
+	connectMsg := protocol.NewConnectMessage(globalTunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
+	if err := f.server.sendToAgent(targetAgent, connectMsg); err != nil {
+		log.Printf("Failed to send connect to target agent: %v", err)
+		return
+	}
+
+	log.Printf("P2P connect: source=%s local=%d -> global=%d -> target=%s, waiting for target ack...",
+		sourceAgent.ID, localTunnelID, globalTunnelID, targetAgent.ID)
+
+	// Wait for acknowledgment from target agent
+	select {
+	case ack := <-ackChan:
+		log.Printf("P2P connect: received ack from target, success=%v, error=%s", ack.Success, ack.Error)
+		// Send ack to source agent:
+		// - msg.TunnelID = localTunnelID (so source can find its pending channel)
+		// - payload.TunnelID = globalTunnelID (the actual tunnel ID to use)
+		responsePayload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+			Success:  ack.Success,
+			TunnelID: globalTunnelID, // Tell source agent to use this ID
+			Error:    ack.Error,
+		})
+		ackMsg := protocol.NewMessage(protocol.MsgTypeP2PConnectAck, localTunnelID, responsePayload)
+		f.server.sendToAgent(sourceAgent, ackMsg)
+
+		if ack.Success {
+			// Register the P2P tunnel mapping with global ID
+			f.tunnelConnMu.Lock()
+			f.tunnelConns[globalTunnelID] = &TunnelConn{
+				ID:            globalTunnelID,
+				AgentID:       targetAgent.ID,
+				Protocol:      payload.Protocol,
+				Target:        fmt.Sprintf("%s:%d", payload.TargetHost, payload.TargetPort),
+				SourceAgentID: sourceAgent.ID,
+				LocalTunnelID: localTunnelID,
+			}
+			log.Printf("P2P tunnel %d registered: source=%s, target=%s", globalTunnelID, sourceAgent.ID, targetAgent.ID)
+			f.tunnelConnMu.Unlock()
+
+			// Store source agent mapping for reverse data flow
+			sourceAgent.tunnelsMu.Lock()
+			sourceAgent.tunnels[globalTunnelID] = &Tunnel{
+				ID:         globalTunnelID,
+				Protocol:   payload.Protocol,
+				TargetHost: payload.TargetHost,
+				TargetPort: payload.TargetPort,
+			}
+			sourceAgent.tunnelsMu.Unlock()
+
+			targetAgent.tunnelsMu.Lock()
+			targetAgent.tunnels[globalTunnelID] = &Tunnel{
+				ID:         globalTunnelID,
+				Protocol:   payload.Protocol,
+				TargetHost: payload.TargetHost,
+				TargetPort: payload.TargetPort,
+			}
+			targetAgent.ActiveTunnels++
+			targetAgent.tunnelsMu.Unlock()
+
+			log.Printf("P2P tunnel established: global=%d source=%s target=%s",
+				globalTunnelID, sourceAgent.ID, targetAgent.ID)
+		}
+
+	case <-time.After(30 * time.Second):
+		ackPayload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+			Success:  false,
+			TunnelID: localTunnelID,
+			Error:    "Connection timeout",
+		})
+		ackMsg := protocol.NewMessage(protocol.MsgTypeP2PConnectAck, localTunnelID, ackPayload)
+		f.server.sendToAgent(sourceAgent, ackMsg)
+	}
+}
+
+// HandleP2PData handles P2P data from source agent to target agent
+func (f *Forwarder) HandleP2PData(sourceAgent *AgentConn, msg *protocol.Message) {
+	log.Printf("HandleP2PData called: tunnelID=%d, from agent=%s, size=%d", msg.TunnelID, sourceAgent.ID, len(msg.Payload))
+
+	f.tunnelConnMu.RLock()
+	tunnelConn, exists := f.tunnelConns[msg.TunnelID]
+	// Debug: list all tunnel IDs
+	tunnelIDs := make([]uint32, 0, len(f.tunnelConns))
+	for id := range f.tunnelConns {
+		tunnelIDs = append(tunnelIDs, id)
+	}
+	f.tunnelConnMu.RUnlock()
+
+	if !exists {
+		log.Printf("P2P data: tunnel %d not found, existing tunnels: %v", msg.TunnelID, tunnelIDs)
+		return
+	}
+
+	// Forward data to target agent
+	targetAgent := f.server.GetAgent(tunnelConn.AgentID)
+	if targetAgent == nil {
+		log.Printf("P2P data: target agent %s not found", tunnelConn.AgentID)
+		return
+	}
+
+	log.Printf("P2P data: forwarding %d bytes from source to target agent %s", len(msg.Payload), targetAgent.ID)
+	dataMsg := protocol.NewDataMessage(msg.TunnelID, msg.Payload)
+	f.server.sendToAgent(targetAgent, dataMsg)
+}
+
+// HandleP2PDataReverse handles data from target agent back to source agent
+func (f *Forwarder) HandleP2PDataReverse(targetAgent *AgentConn, tunnelID uint32, data []byte) {
+	// Get tunnel info to find source agent
+	f.tunnelConnMu.RLock()
+	tunnelConn, exists := f.tunnelConns[tunnelID]
+	f.tunnelConnMu.RUnlock()
+
+	if !exists || tunnelConn.SourceAgentID == "" {
+		log.Printf("P2P reverse: tunnel %d not found or no source agent", tunnelID)
+		return
+	}
+
+	sourceAgent := f.server.GetAgent(tunnelConn.SourceAgentID)
+	if sourceAgent == nil {
+		log.Printf("P2P reverse: source agent %s not found", tunnelConn.SourceAgentID)
+		return
+	}
+
+	log.Printf("P2P reverse: forwarding %d bytes from target to source agent %s", len(data), sourceAgent.ID)
+	// Send data back to source agent with the global tunnel ID
+	// Source agent will map it using its stored global->local mapping
+	dataMsg := protocol.NewMessage(protocol.MsgTypeP2PData, tunnelID, data)
+	f.server.sendToAgent(sourceAgent, dataMsg)
 }
 

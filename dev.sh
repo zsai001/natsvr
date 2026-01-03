@@ -128,6 +128,29 @@ build() {
     echo -e "  bin/agent"
 }
 
+build_linux() {
+    echo -e "${BLUE}构建 Linux 版本...${NC}"
+    
+    # 构建前端
+    echo -e "${YELLOW}构建前端...${NC}"
+    cd web && npm install && npm run build
+    cd ..
+    
+    # 复制前端
+    echo -e "${YELLOW}复制前端资源...${NC}"
+    rm -rf cmd/cloud/dist
+    cp -r web/dist cmd/cloud/dist
+    
+    # 构建 Linux amd64 后端
+    echo -e "${YELLOW}构建 Linux amd64 后端...${NC}"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/cloud-linux-amd64 ./cmd/cloud
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/agent-linux-amd64 ./cmd/agent
+    
+    echo -e "${GREEN}构建完成!${NC}"
+    echo -e "  bin/cloud-linux-amd64"
+    echo -e "  bin/agent-linux-amd64"
+}
+
 clean() {
     echo -e "${YELLOW}清理构建产物...${NC}"
     rm -rf bin/
@@ -145,6 +168,7 @@ usage() {
     echo "  agent        仅启动 Agent"
     echo "  frontend     仅启动前端开发服务器"
     echo "  build        构建项目"
+    echo "  build-linux  构建 Linux amd64 版本"
     echo "  clean        清理构建产物"
     echo ""
 }
@@ -164,6 +188,9 @@ case "${1:-}" in
         ;;
     build)
         build
+        ;;
+    build-linux)
+        build_linux
         ;;
     clean)
         clean

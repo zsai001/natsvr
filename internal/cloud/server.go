@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -299,6 +300,9 @@ func (s *Server) handleAgentConnection(conn *websocket.Conn, clientIP string) {
 	// Reset read deadline
 	conn.SetReadDeadline(time.Time{})
 
+	// Notify forwarder about new agent connection
+	s.forwarder.OnAgentConnected(agent)
+
 	// Handle messages
 	s.handleAgentMessages(agent)
 
@@ -340,6 +344,12 @@ func (s *Server) sendAuthResponse(conn *websocket.Conn, success bool, agentID, e
 }
 
 func (s *Server) handleAgentMessages(agent *AgentConn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in handleAgentMessages for agent %s: %v", agent.ID, r)
+		}
+	}()
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -382,11 +392,22 @@ func (s *Server) handleAgentMessages(agent *AgentConn) {
 
 		case protocol.MsgTypeClose:
 			s.forwarder.HandleClose(agent, msg)
+
+		case protocol.MsgTypeP2PConnect:
+			go s.forwarder.HandleP2PConnect(agent, msg)
+
+		case protocol.MsgTypeP2PData:
+			log.Printf("Received P2P data from agent %s, tunnelID=%d, size=%d bytes", agent.ID, msg.TunnelID, len(msg.Payload))
+			s.forwarder.HandleP2PData(agent, msg)
 		}
 	}
 }
 
 func (s *Server) sendToAgent(agent *AgentConn, msg *protocol.Message) error {
+	if agent == nil {
+		return fmt.Errorf("agent is nil")
+	}
+
 	data, err := msg.Encode()
 	if err != nil {
 		return err
@@ -394,6 +415,10 @@ func (s *Server) sendToAgent(agent *AgentConn, msg *protocol.Message) error {
 
 	agent.writeMu.Lock()
 	defer agent.writeMu.Unlock()
+
+	if agent.Conn == nil {
+		return fmt.Errorf("agent connection is nil")
+	}
 
 	err = agent.Conn.WriteMessage(websocket.BinaryMessage, data)
 	if err == nil {
@@ -406,6 +431,17 @@ func (s *Server) GetAgent(id string) *AgentConn {
 	s.agentsMu.RLock()
 	defer s.agentsMu.RUnlock()
 	return s.agents[id]
+}
+
+func (s *Server) GetAgentByName(name string) *AgentConn {
+	s.agentsMu.RLock()
+	defer s.agentsMu.RUnlock()
+	for _, agent := range s.agents {
+		if agent.Name == name {
+			return agent
+		}
+	}
+	return nil
 }
 
 func (s *Server) GetAgents() []*AgentConn {

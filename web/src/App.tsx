@@ -2,29 +2,46 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { ForwardingPage } from '@/pages/ForwardingPage'
 import { SettingsPage } from '@/pages/SettingsPage'
-import { Network, ArrowRightLeft, Settings, Activity } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { useTheme } from '@/hooks/useTheme'
+import { Network, ArrowRightLeft, Settings, Activity, Sun, Moon } from 'lucide-react'
 
 function App() {
+  const { theme, toggleTheme } = useTheme()
+
   return (
     <div className="min-h-screen bg-background grid-background">
       {/* Header */}
-      <header className="border-b border-border/50 backdrop-blur-sm sticky top-0 z-40">
+      <header className="border-b border-border/50 backdrop-blur-sm sticky top-0 z-40 bg-background/80">
         <div className="container mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                <Network className="w-5 h-5 text-background" />
+                <Network className="w-5 h-5 text-white dark:text-background" />
               </div>
               <div>
                 <h1 className="text-xl font-bold tracking-tight">natsvr</h1>
                 <p className="text-xs text-muted-foreground">内网穿透控制面板</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-500/10 border border-green-500/20">
-                <Activity className="w-3 h-3 text-green-400 animate-pulse-glow" />
-                <span className="text-xs text-green-400 font-medium">系统运行中</span>
+                <Activity className="w-3 h-3 text-green-500 dark:text-green-400 animate-pulse-glow" />
+                <span className="text-xs text-green-600 dark:text-green-400 font-medium">系统运行中</span>
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleTheme}
+                className="rounded-full"
+                title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
+              >
+                {theme === 'dark' ? (
+                  <Sun className="w-5 h-5 text-yellow-400" />
+                ) : (
+                  <Moon className="w-5 h-5 text-slate-600" />
+                )}
+              </Button>
             </div>
           </div>
         </div>

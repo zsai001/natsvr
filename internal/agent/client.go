@@ -20,15 +20,17 @@ type Config struct {
 
 // Client is the agent client
 type Client struct {
-	config    *Config
-	agentID   string
-	conn      *websocket.Conn
-	connMu    sync.Mutex
-	tunnels   map[uint32]*TunnelHandler
-	tunnelsMu sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	connected bool
+	config       *Config
+	agentID      string
+	conn         *websocket.Conn
+	connMu       sync.Mutex
+	tunnels      map[uint32]*TunnelHandler
+	tunnelsMu    sync.RWMutex
+	localProxies map[string]*P2PProxy // rule ID -> proxy
+	localProxyMu sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	connected    bool
 }
 
 // TunnelHandler handles a single tunnel
@@ -52,11 +54,12 @@ func NewClient(cfg *Config) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		config:  cfg,
-		agentID: utils.GenerateID(16),
-		tunnels: make(map[uint32]*TunnelHandler),
-		ctx:     ctx,
-		cancel:  cancel,
+		config:       cfg,
+		agentID:      utils.GenerateID(16),
+		tunnels:      make(map[uint32]*TunnelHandler),
+		localProxies: make(map[string]*P2PProxy),
+		ctx:          ctx,
+		cancel:       cancel,
 	}, nil
 }
 
@@ -87,8 +90,9 @@ func (c *Client) Run() {
 		c.connected = false
 		log.Printf("Disconnected from server, reconnecting...")
 
-		// Cleanup tunnels
+		// Cleanup tunnels and local proxies
 		c.cleanupTunnels()
+		c.cleanupLocalProxies()
 
 		time.Sleep(2 * time.Second)
 	}
@@ -105,6 +109,7 @@ func (c *Client) Shutdown() {
 	c.connMu.Unlock()
 
 	c.cleanupTunnels()
+	c.cleanupLocalProxies()
 }
 
 func (c *Client) connect() error {
@@ -216,6 +221,18 @@ func (c *Client) handleMessages() {
 
 		case protocol.MsgTypeClose:
 			c.handleClose(msg)
+
+		case protocol.MsgTypeLocalProxyStart:
+			go c.handleLocalProxyStart(msg)
+
+		case protocol.MsgTypeLocalProxyStop:
+			c.handleLocalProxyStop(msg)
+
+		case protocol.MsgTypeP2PConnectAck:
+			c.handleP2PConnectAck(msg)
+
+		case protocol.MsgTypeP2PData:
+			c.handleP2PData(msg)
 		}
 	}
 }
@@ -228,7 +245,8 @@ func (c *Client) handleConnect(msg *protocol.Message) {
 		return
 	}
 
-	log.Printf("Tunnel connect request: %s %s:%d", payload.Protocol, payload.TargetHost, payload.TargetPort)
+	log.Printf("Tunnel connect request: tunnelID=%d, protocol=%s, target=%s:%d",
+		msg.TunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
 
 	var processor TunnelProcessor
 	switch payload.Protocol {
@@ -243,8 +261,10 @@ func (c *Client) handleConnect(msg *protocol.Message) {
 		return
 	}
 
+	log.Printf("Tunnel %d: connecting to %s:%d...", msg.TunnelID, payload.TargetHost, payload.TargetPort)
+
 	if err := processor.Start(); err != nil {
-		log.Printf("Failed to start tunnel: %v", err)
+		log.Printf("Tunnel %d: failed to connect to %s:%d: %v", msg.TunnelID, payload.TargetHost, payload.TargetPort, err)
 		c.sendConnectAck(msg.TunnelID, false, err.Error())
 		return
 	}
@@ -261,8 +281,9 @@ func (c *Client) handleConnect(msg *protocol.Message) {
 	c.tunnels[msg.TunnelID] = handler
 	c.tunnelsMu.Unlock()
 
+	log.Printf("Tunnel %d: connected successfully, sending ack", msg.TunnelID)
 	c.sendConnectAck(msg.TunnelID, true, "")
-	log.Printf("Tunnel %d established: %s %s:%d", msg.TunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
+	log.Printf("Tunnel %d established: %s -> %s:%d", msg.TunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
 }
 
 func (c *Client) handleData(msg *protocol.Message) {
@@ -398,5 +419,92 @@ func (c *Client) heartbeat() {
 			c.sendMessage(protocol.NewHeartbeatMessage())
 		}
 	}
+}
+
+func (c *Client) handleLocalProxyStart(msg *protocol.Message) {
+	payload, err := protocol.DecodeLocalProxyStartPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode local proxy start payload: %v", err)
+		return
+	}
+
+	log.Printf("Starting local proxy: %s on port %d -> %s:%s:%d",
+		payload.RuleID, payload.ListenPort, payload.TargetAgentID, payload.TargetHost, payload.TargetPort)
+
+	c.localProxyMu.Lock()
+	if _, exists := c.localProxies[payload.RuleID]; exists {
+		c.localProxyMu.Unlock()
+		log.Printf("Local proxy %s already exists", payload.RuleID)
+		return
+	}
+	c.localProxyMu.Unlock()
+
+	proxy := NewP2PProxy(c, payload.RuleID, int(payload.ListenPort), payload.TargetAgentID, payload.TargetHost, int(payload.TargetPort), payload.Protocol)
+	if err := proxy.Start(); err != nil {
+		log.Printf("Failed to start local proxy %s: %v", payload.RuleID, err)
+		return
+	}
+
+	c.localProxyMu.Lock()
+	c.localProxies[payload.RuleID] = proxy
+	c.localProxyMu.Unlock()
+
+	log.Printf("Local proxy %s started on port %d", payload.RuleID, payload.ListenPort)
+}
+
+func (c *Client) handleLocalProxyStop(msg *protocol.Message) {
+	payload, err := protocol.DecodeLocalProxyStopPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode local proxy stop payload: %v", err)
+		return
+	}
+
+	c.localProxyMu.Lock()
+	proxy, exists := c.localProxies[payload.RuleID]
+	if exists {
+		proxy.Stop()
+		delete(c.localProxies, payload.RuleID)
+	}
+	c.localProxyMu.Unlock()
+
+	if exists {
+		log.Printf("Local proxy %s stopped", payload.RuleID)
+	}
+}
+
+func (c *Client) handleP2PConnectAck(msg *protocol.Message) {
+	ack, err := protocol.DecodeConnectAckPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode P2P connect ack: %v", err)
+		return
+	}
+
+	// Find the proxy that has this pending tunnel
+	c.localProxyMu.RLock()
+	for _, proxy := range c.localProxies {
+		proxy.HandleConnectAck(msg.TunnelID, ack)
+	}
+	c.localProxyMu.RUnlock()
+}
+
+func (c *Client) handleP2PData(msg *protocol.Message) {
+	// Find the proxy connection for this tunnel
+	c.localProxyMu.RLock()
+	for _, proxy := range c.localProxies {
+		if proxy.HandleData(msg.TunnelID, msg.Payload) {
+			c.localProxyMu.RUnlock()
+			return
+		}
+	}
+	c.localProxyMu.RUnlock()
+}
+
+func (c *Client) cleanupLocalProxies() {
+	c.localProxyMu.Lock()
+	for id, proxy := range c.localProxies {
+		proxy.Stop()
+		delete(c.localProxies, id)
+	}
+	c.localProxyMu.Unlock()
 }
 

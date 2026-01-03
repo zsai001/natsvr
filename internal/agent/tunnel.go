@@ -69,12 +69,14 @@ func (t *TCPTunnel) HandleData(data []byte) error {
 		return fmt.Errorf("connection closed")
 	}
 
+	log.Printf("Tunnel %d: writing %d bytes to target", t.tunnelID, len(data))
 	_, err := conn.Write(data)
 	return err
 }
 
 func (t *TCPTunnel) readFromTarget() {
 	buf := make([]byte, 32768)
+	log.Printf("Tunnel %d: starting to read from target %s:%d", t.tunnelID, t.targetHost, t.targetPort)
 
 	for {
 		t.connMu.Lock()
@@ -83,18 +85,22 @@ func (t *TCPTunnel) readFromTarget() {
 		t.connMu.Unlock()
 
 		if closed || conn == nil {
+			log.Printf("Tunnel %d: connection closed or nil", t.tunnelID)
 			return
 		}
 
 		n, err := conn.Read(buf)
 		if err != nil {
 			if !t.closed {
+				log.Printf("Tunnel %d: read from target error: %v", t.tunnelID, err)
 				t.client.SendClose(t.tunnelID)
 			}
 			return
 		}
 
+		log.Printf("Tunnel %d: read %d bytes from target, sending to cloud", t.tunnelID, n)
 		if err := t.client.SendData(t.tunnelID, buf[:n]); err != nil {
+			log.Printf("Tunnel %d: send data error: %v", t.tunnelID, err)
 			return
 		}
 	}

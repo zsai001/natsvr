@@ -406,3 +406,252 @@ func DecodeErrorPayload(data []byte) (*ErrorPayload, error) {
 	}, nil
 }
 
+// EncodeLocalProxyStartPayload encodes a local proxy start payload
+func EncodeLocalProxyStartPayload(p *LocalProxyStartPayload) []byte {
+	ruleIDBytes := []byte(p.RuleID)
+	protocolBytes := []byte(p.Protocol)
+	targetAgentBytes := []byte(p.TargetAgentID)
+	targetHostBytes := []byte(p.TargetHost)
+
+	// 2 (ruleID len) + ruleID + 2 (protocol len) + protocol + 2 (listen port)
+	// + 2 (target agent len) + target agent + 2 (target host len) + target host + 2 (target port)
+	buf := make([]byte, 12+len(ruleIDBytes)+len(protocolBytes)+len(targetAgentBytes)+len(targetHostBytes))
+
+	offset := 0
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(ruleIDBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(ruleIDBytes)], ruleIDBytes)
+	offset += len(ruleIDBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(protocolBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(protocolBytes)], protocolBytes)
+	offset += len(protocolBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], p.ListenPort)
+	offset += 2
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(targetAgentBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(targetAgentBytes)], targetAgentBytes)
+	offset += len(targetAgentBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(targetHostBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(targetHostBytes)], targetHostBytes)
+	offset += len(targetHostBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], p.TargetPort)
+
+	return buf
+}
+
+// DecodeLocalProxyStartPayload decodes a local proxy start payload
+func DecodeLocalProxyStartPayload(data []byte) (*LocalProxyStartPayload, error) {
+	if len(data) < 12 {
+		return nil, ErrInvalidPayload
+	}
+
+	offset := 0
+
+	ruleIDLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(ruleIDLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	ruleID := string(data[offset : offset+int(ruleIDLen)])
+	offset += int(ruleIDLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	protocolLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(protocolLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	protocol := string(data[offset : offset+int(protocolLen)])
+	offset += int(protocolLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	listenPort := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetAgentLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(targetAgentLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetAgentID := string(data[offset : offset+int(targetAgentLen)])
+	offset += int(targetAgentLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetHostLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(targetHostLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetHost := string(data[offset : offset+int(targetHostLen)])
+	offset += int(targetHostLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetPort := binary.BigEndian.Uint16(data[offset : offset+2])
+
+	return &LocalProxyStartPayload{
+		RuleID:        ruleID,
+		Protocol:      protocol,
+		ListenPort:    listenPort,
+		TargetAgentID: targetAgentID,
+		TargetHost:    targetHost,
+		TargetPort:    targetPort,
+	}, nil
+}
+
+// EncodeLocalProxyStopPayload encodes a local proxy stop payload
+func EncodeLocalProxyStopPayload(p *LocalProxyStopPayload) []byte {
+	ruleIDBytes := []byte(p.RuleID)
+	buf := make([]byte, 2+len(ruleIDBytes))
+	binary.BigEndian.PutUint16(buf[0:2], uint16(len(ruleIDBytes)))
+	copy(buf[2:], ruleIDBytes)
+	return buf
+}
+
+// DecodeLocalProxyStopPayload decodes a local proxy stop payload
+func DecodeLocalProxyStopPayload(data []byte) (*LocalProxyStopPayload, error) {
+	if len(data) < 2 {
+		return nil, ErrInvalidPayload
+	}
+
+	ruleIDLen := binary.BigEndian.Uint16(data[0:2])
+	if 2+int(ruleIDLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	ruleID := string(data[2 : 2+ruleIDLen])
+
+	return &LocalProxyStopPayload{
+		RuleID: ruleID,
+	}, nil
+}
+
+// EncodeP2PConnectPayload encodes a P2P connect payload
+func EncodeP2PConnectPayload(p *P2PConnectPayload) []byte {
+	srcAgentBytes := []byte(p.SourceAgentID)
+	protocolBytes := []byte(p.Protocol)
+	targetHostBytes := []byte(p.TargetHost)
+
+	buf := make([]byte, 10+len(srcAgentBytes)+len(protocolBytes)+len(targetHostBytes))
+
+	offset := 0
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(srcAgentBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(srcAgentBytes)], srcAgentBytes)
+	offset += len(srcAgentBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(protocolBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(protocolBytes)], protocolBytes)
+	offset += len(protocolBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(targetHostBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(targetHostBytes)], targetHostBytes)
+	offset += len(targetHostBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], p.TargetPort)
+
+	return buf
+}
+
+// DecodeP2PConnectPayload decodes a P2P connect payload
+func DecodeP2PConnectPayload(data []byte) (*P2PConnectPayload, error) {
+	if len(data) < 10 {
+		return nil, ErrInvalidPayload
+	}
+
+	offset := 0
+
+	srcAgentLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(srcAgentLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	srcAgent := string(data[offset : offset+int(srcAgentLen)])
+	offset += int(srcAgentLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	protocolLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(protocolLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	protocol := string(data[offset : offset+int(protocolLen)])
+	offset += int(protocolLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetHostLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(targetHostLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetHost := string(data[offset : offset+int(targetHostLen)])
+	offset += int(targetHostLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	targetPort := binary.BigEndian.Uint16(data[offset : offset+2])
+
+	return &P2PConnectPayload{
+		SourceAgentID: srcAgent,
+		Protocol:      protocol,
+		TargetHost:    targetHost,
+		TargetPort:    targetPort,
+	}, nil
+}
+
+// EncodeP2PDataPayload encodes a P2P data payload
+func EncodeP2PDataPayload(p *P2PDataPayload) []byte {
+	srcAgentBytes := []byte(p.SourceAgentID)
+	buf := make([]byte, 2+len(srcAgentBytes)+len(p.Data))
+
+	binary.BigEndian.PutUint16(buf[0:2], uint16(len(srcAgentBytes)))
+	copy(buf[2:2+len(srcAgentBytes)], srcAgentBytes)
+	copy(buf[2+len(srcAgentBytes):], p.Data)
+
+	return buf
+}
+
+// DecodeP2PDataPayload decodes a P2P data payload
+func DecodeP2PDataPayload(data []byte) (*P2PDataPayload, error) {
+	if len(data) < 2 {
+		return nil, ErrInvalidPayload
+	}
+
+	srcAgentLen := binary.BigEndian.Uint16(data[0:2])
+	if 2+int(srcAgentLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	srcAgent := string(data[2 : 2+srcAgentLen])
+
+	payloadData := make([]byte, len(data)-2-int(srcAgentLen))
+	copy(payloadData, data[2+srcAgentLen:])
+
+	return &P2PDataPayload{
+		SourceAgentID: srcAgent,
+		Data:          payloadData,
+	}, nil
+}
+

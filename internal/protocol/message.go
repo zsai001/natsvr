@@ -30,6 +30,13 @@ const (
 	// ICMP specific
 	MsgTypeICMPData MessageType = 40
 
+	// Local proxy control (agent-to-agent forwarding)
+	MsgTypeLocalProxyStart MessageType = 50
+	MsgTypeLocalProxyStop  MessageType = 51
+	MsgTypeP2PConnect      MessageType = 52
+	MsgTypeP2PConnectAck   MessageType = 53
+	MsgTypeP2PData         MessageType = 54
+
 	// Error
 	MsgTypeError MessageType = 255
 )
@@ -99,6 +106,35 @@ type ICMPDataPayload struct {
 type ErrorPayload struct {
 	Code    uint16
 	Message string
+}
+
+// LocalProxyStartPayload tells agent to start listening for local proxy
+type LocalProxyStartPayload struct {
+	RuleID        string
+	Protocol      string
+	ListenPort    uint16
+	TargetAgentID string
+	TargetHost    string
+	TargetPort    uint16
+}
+
+// LocalProxyStopPayload tells agent to stop a local proxy
+type LocalProxyStopPayload struct {
+	RuleID string
+}
+
+// P2PConnectPayload is used for agent-to-agent tunnel connection
+type P2PConnectPayload struct {
+	SourceAgentID string
+	Protocol      string
+	TargetHost    string
+	TargetPort    uint16
+}
+
+// P2PDataPayload wraps data between source and target agents
+type P2PDataPayload struct {
+	SourceAgentID string
+	Data          []byte
 }
 
 // Error codes
@@ -269,6 +305,16 @@ func (t MessageType) String() string {
 		return "UDPData"
 	case MsgTypeICMPData:
 		return "ICMPData"
+	case MsgTypeLocalProxyStart:
+		return "LocalProxyStart"
+	case MsgTypeLocalProxyStop:
+		return "LocalProxyStop"
+	case MsgTypeP2PConnect:
+		return "P2PConnect"
+	case MsgTypeP2PConnectAck:
+		return "P2PConnectAck"
+	case MsgTypeP2PData:
+		return "P2PData"
 	case MsgTypeError:
 		return "Error"
 	default:
