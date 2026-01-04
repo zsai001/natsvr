@@ -44,6 +44,10 @@ const (
 	MsgTypeAgentCloudConnectAck MessageType = 63
 	MsgTypeAgentCloudData       MessageType = 64
 
+	// Rule-specific connection (per-rule isolation)
+	MsgTypeRuleAuth         MessageType = 70 // Agent authenticates a rule-specific connection
+	MsgTypeRuleAuthResponse MessageType = 71 // Cloud responds to rule auth
+
 	// Error
 	MsgTypeError MessageType = 255
 )
@@ -163,6 +167,20 @@ type AgentCloudConnectPayload struct {
 	Protocol   string
 	TargetHost string
 	TargetPort uint16
+}
+
+// RuleAuthPayload is the rule-specific connection authentication payload
+type RuleAuthPayload struct {
+	Token   string // Agent auth token
+	AgentID string // Agent ID (from main connection)
+	RuleID  string // The rule this connection is dedicated to
+}
+
+// RuleAuthResponsePayload is the response to rule auth
+type RuleAuthResponsePayload struct {
+	Success bool
+	RuleID  string
+	Error   string
 }
 
 // Error codes
@@ -353,6 +371,10 @@ func (t MessageType) String() string {
 		return "AgentCloudConnectAck"
 	case MsgTypeAgentCloudData:
 		return "AgentCloudData"
+	case MsgTypeRuleAuth:
+		return "RuleAuth"
+	case MsgTypeRuleAuthResponse:
+		return "RuleAuthResponse"
 	case MsgTypeError:
 		return "Error"
 	default:

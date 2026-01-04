@@ -22,15 +22,18 @@ func NewRateLimiter(bytesPerSecond int64) *RateLimiter {
 	if bytesPerSecond <= 0 {
 		return nil // nil means unlimited
 	}
+	// Start with partial bucket (0.5 second worth) to limit initial burst
+	// Max tokens = 1 second worth, allowing small burst but staying close to rate
 	return &RateLimiter{
 		bytesPerSecond: bytesPerSecond,
-		tokens:         bytesPerSecond, // Start with full bucket
-		maxTokens:      bytesPerSecond * 2, // Allow burst of 2 seconds
+		tokens:         bytesPerSecond / 2, // Start with half second worth
+		maxTokens:      bytesPerSecond,     // Allow burst of 1 second max
 		lastRefill:     time.Now(),
 	}
 }
 
 // Wait blocks until n bytes can be consumed
+// This uses a simple token bucket algorithm with proper concurrency handling
 func (r *RateLimiter) Wait(n int64) {
 	if r == nil || r.bytesPerSecond <= 0 {
 		return
@@ -38,19 +41,24 @@ func (r *RateLimiter) Wait(n int64) {
 
 	for {
 		r.mu.Lock()
-		r.refill()
 		
+		// Refill tokens based on elapsed time
+		r.refill()
+
+		// If we have enough tokens, consume and return immediately
 		if r.tokens >= n {
 			r.tokens -= n
 			r.mu.Unlock()
 			return
 		}
-		
-		// Calculate wait time
+
+		// Not enough tokens - calculate how long to wait for enough tokens
 		needed := n - r.tokens
-		waitTime := time.Duration(float64(needed) / float64(r.bytesPerSecond) * float64(time.Second))
+		waitTime := time.Duration(float64(needed)/float64(r.bytesPerSecond)*float64(time.Second)) + time.Millisecond
+		
 		r.mu.Unlock()
 		
+		// Sleep and retry
 		time.Sleep(waitTime)
 	}
 }
@@ -58,8 +66,12 @@ func (r *RateLimiter) Wait(n int64) {
 func (r *RateLimiter) refill() {
 	now := time.Now()
 	elapsed := now.Sub(r.lastRefill)
-	r.lastRefill = now
 	
+	if elapsed <= 0 {
+		return
+	}
+	
+	r.lastRefill = now
 	tokensToAdd := int64(float64(r.bytesPerSecond) * elapsed.Seconds())
 	r.tokens += tokensToAdd
 	if r.tokens > r.maxTokens {

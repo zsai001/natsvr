@@ -280,3 +280,210 @@ func (t *ICMPTunnel) HandleICMPData(payload *protocol.ICMPDataPayload) {
 	// 4. Forward response back through the tunnel
 }
 
+// =============================================================================
+// Rule-specific tunnels (use dedicated rule connection instead of main conn)
+// =============================================================================
+
+// RuleTCPTunnel handles TCP tunnel on a rule-specific connection
+type RuleTCPTunnel struct {
+	client     *Client
+	ruleConn   *RuleConnection
+	tunnelID   uint32
+	targetHost string
+	targetPort uint16
+	conn       net.Conn
+	connMu     sync.Mutex
+	closed     bool
+}
+
+// NewRuleTCPTunnel creates a new TCP tunnel for a rule connection
+func NewRuleTCPTunnel(client *Client, ruleConn *RuleConnection, tunnelID uint32, targetHost string, targetPort uint16) *RuleTCPTunnel {
+	return &RuleTCPTunnel{
+		client:     client,
+		ruleConn:   ruleConn,
+		tunnelID:   tunnelID,
+		targetHost: targetHost,
+		targetPort: targetPort,
+	}
+}
+
+// Start connects to the target and starts forwarding
+func (t *RuleTCPTunnel) Start() error {
+	addr := fmt.Sprintf("%s:%d", t.targetHost, t.targetPort)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return err
+	}
+
+	t.connMu.Lock()
+	t.conn = conn
+	t.connMu.Unlock()
+
+	// Start reading from target
+	go t.readFromTarget()
+
+	return nil
+}
+
+// Stop closes the tunnel
+func (t *RuleTCPTunnel) Stop() {
+	t.connMu.Lock()
+	t.closed = true
+	if t.conn != nil {
+		t.conn.Close()
+	}
+	t.connMu.Unlock()
+}
+
+// HandleData writes data to the target
+func (t *RuleTCPTunnel) HandleData(data []byte) error {
+	t.connMu.Lock()
+	conn := t.conn
+	t.connMu.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection closed")
+	}
+
+	_, err := conn.Write(data)
+	return err
+}
+
+func (t *RuleTCPTunnel) readFromTarget() {
+	buf := make([]byte, 32768)
+
+	for {
+		t.connMu.Lock()
+		conn := t.conn
+		closed := t.closed
+		t.connMu.Unlock()
+
+		if closed || conn == nil {
+			return
+		}
+
+		n, err := conn.Read(buf)
+		if err != nil {
+			if !t.closed {
+				t.client.SendRuleClose(t.ruleConn, t.tunnelID)
+			}
+			return
+		}
+
+		if err := t.client.SendRuleData(t.ruleConn, t.tunnelID, buf[:n]); err != nil {
+			return
+		}
+	}
+}
+
+// RuleUDPTunnel handles UDP tunnel on a rule-specific connection
+type RuleUDPTunnel struct {
+	client     *Client
+	ruleConn   *RuleConnection
+	tunnelID   uint32
+	targetHost string
+	targetPort uint16
+	conn       *net.UDPConn
+	connMu     sync.Mutex
+	closed     bool
+}
+
+// NewRuleUDPTunnel creates a new UDP tunnel for a rule connection
+func NewRuleUDPTunnel(client *Client, ruleConn *RuleConnection, tunnelID uint32, targetHost string, targetPort uint16) *RuleUDPTunnel {
+	return &RuleUDPTunnel{
+		client:     client,
+		ruleConn:   ruleConn,
+		tunnelID:   tunnelID,
+		targetHost: targetHost,
+		targetPort: targetPort,
+	}
+}
+
+// Start initializes the UDP connection
+func (t *RuleUDPTunnel) Start() error {
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", t.targetHost, t.targetPort))
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		return err
+	}
+
+	t.connMu.Lock()
+	t.conn = conn
+	t.connMu.Unlock()
+
+	// Start reading from target
+	go t.readFromTarget()
+
+	return nil
+}
+
+// Stop closes the tunnel
+func (t *RuleUDPTunnel) Stop() {
+	t.connMu.Lock()
+	t.closed = true
+	if t.conn != nil {
+		t.conn.Close()
+	}
+	t.connMu.Unlock()
+}
+
+// HandleData writes data to the target
+func (t *RuleUDPTunnel) HandleData(data []byte) error {
+	t.connMu.Lock()
+	conn := t.conn
+	t.connMu.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection closed")
+	}
+
+	_, err := conn.Write(data)
+	return err
+}
+
+// HandleUDPData handles UDP data with addressing info
+func (t *RuleUDPTunnel) HandleUDPData(payload *protocol.UDPDataPayload) {
+	t.HandleData(payload.Data)
+}
+
+func (t *RuleUDPTunnel) readFromTarget() {
+	buf := make([]byte, 65535)
+
+	for {
+		t.connMu.Lock()
+		conn := t.conn
+		closed := t.closed
+		t.connMu.Unlock()
+
+		if closed || conn == nil {
+			return
+		}
+
+		conn.SetReadDeadline(time.Now().Add(time.Minute))
+		n, err := conn.Read(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			if !t.closed {
+				log.Printf("UDP read error: %v", err)
+			}
+			return
+		}
+
+		// Send response back through rule connection
+		udpPayload := protocol.EncodeUDPDataPayload(&protocol.UDPDataPayload{
+			SourceAddr: t.targetHost,
+			SourcePort: t.targetPort,
+			Data:       buf[:n],
+		})
+
+		msg := protocol.NewMessage(protocol.MsgTypeUDPData, t.tunnelID, udpPayload)
+		t.client.sendRuleMessage(t.ruleConn, msg)
+	}
+}
+

@@ -34,19 +34,19 @@ export function AgentsPage() {
     <div className="space-y-6">
       {/* Traffic Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 stagger-children">
-        <Card className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/5 border-emerald-500/20">
+        <Card className="bg-gradient-to-br from-teal-500/10 to-teal-600/5 border-teal-500/20">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-emerald-400/80">总上传流量</p>
-                <p className="text-2xl font-bold text-emerald-400">{formatBytes(stats?.txBytes || 0)}</p>
-                <p className="text-xs text-emerald-400/60 mt-1">
+                <p className="text-sm text-teal-400/80">总上传流量</p>
+                <p className="text-2xl font-bold text-teal-400">{formatBytes(stats?.txBytes || 0)}</p>
+                <p className="text-xs text-teal-400/60 mt-1">
                   <TrendingUp className="w-3 h-3 inline mr-1" />
                   {formatSpeed(stats?.txSpeed || 0)}
                 </p>
               </div>
-              <div className="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <Upload className="w-6 h-6 text-emerald-400" />
+              <div className="w-12 h-12 rounded-full bg-teal-500/20 flex items-center justify-center">
+                <Upload className="w-6 h-6 text-teal-400" />
               </div>
             </div>
           </CardContent>

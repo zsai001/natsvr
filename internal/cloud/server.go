@@ -48,7 +48,7 @@ type AgentConn struct {
 	ID            string
 	Name          string
 	IP            string
-	Conn          *websocket.Conn
+	Conn          *websocket.Conn // Main control connection
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
 	TxBytes       int64
@@ -57,6 +57,16 @@ type AgentConn struct {
 	writeMu       sync.Mutex
 	tunnels       map[uint32]*Tunnel
 	tunnelsMu     sync.RWMutex
+	// Rule-specific connections (per-rule isolation)
+	ruleConns   map[string]*RuleConn // ruleID -> connection
+	ruleConnsMu sync.RWMutex
+}
+
+// RuleConn represents a rule-specific WebSocket connection
+type RuleConn struct {
+	RuleID  string
+	Conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 // Tunnel represents an active tunnel
@@ -115,7 +125,7 @@ func (s *Server) setupRouter() {
 	{
 		api.GET("/version", s.handleGetVersion)
 		api.GET("/stats", s.handleGetStats)
-		
+
 		api.GET("/agents", s.handleGetAgents)
 		api.GET("/agents/:id", s.handleGetAgent)
 
@@ -249,6 +259,12 @@ func (s *Server) handleAgentConnection(conn *websocket.Conn, clientIP string) {
 		return
 	}
 
+	// Check if this is a rule-specific connection
+	if msg.Type == protocol.MsgTypeRuleAuth {
+		s.handleRuleConnection(conn, clientIP, msg)
+		return
+	}
+
 	if msg.Type != protocol.MsgTypeAuth {
 		log.Printf("Expected auth message, got %v", msg.Type)
 		return
@@ -282,6 +298,7 @@ func (s *Server) handleAgentConnection(conn *websocket.Conn, clientIP string) {
 		ConnectedAt:   time.Now(),
 		LastHeartbeat: time.Now(),
 		tunnels:       make(map[uint32]*Tunnel),
+		ruleConns:     make(map[string]*RuleConn),
 	}
 
 	s.agentsMu.Lock()
@@ -434,6 +451,52 @@ func (s *Server) sendToAgent(agent *AgentConn, msg *protocol.Message) error {
 	return err
 }
 
+// sendToAgentRule sends a message to an agent's rule-specific connection
+// Falls back to main connection if rule connection doesn't exist
+func (s *Server) sendToAgentRule(agent *AgentConn, ruleID string, msg *protocol.Message) error {
+	if agent == nil {
+		return fmt.Errorf("agent is nil")
+	}
+
+	// Try rule-specific connection first
+	agent.ruleConnsMu.RLock()
+	ruleConn, hasRuleConn := agent.ruleConns[ruleID]
+	agent.ruleConnsMu.RUnlock()
+
+	if hasRuleConn && ruleConn != nil && ruleConn.Conn != nil {
+		data, err := msg.Encode()
+		if err != nil {
+			return err
+		}
+
+		ruleConn.writeMu.Lock()
+		err = ruleConn.Conn.WriteMessage(websocket.BinaryMessage, data)
+		ruleConn.writeMu.Unlock()
+
+		if err == nil {
+			agent.TxBytes += int64(len(data))
+			return nil
+		}
+		// If rule connection fails, fall through to main connection
+		log.Printf("Rule connection %s failed, falling back to main: %v", ruleID, err)
+	}
+
+	// Fall back to main connection
+	return s.sendToAgent(agent, msg)
+}
+
+// GetAgentRuleConn gets an agent's rule-specific connection
+func (s *Server) GetAgentRuleConn(agentID, ruleID string) *RuleConn {
+	agent := s.GetAgent(agentID)
+	if agent == nil {
+		return nil
+	}
+
+	agent.ruleConnsMu.RLock()
+	defer agent.ruleConnsMu.RUnlock()
+	return agent.ruleConns[ruleID]
+}
+
 func (s *Server) GetAgent(id string) *AgentConn {
 	s.agentsMu.RLock()
 	defer s.agentsMu.RUnlock()
@@ -483,6 +546,154 @@ func (s *Server) heartbeatChecker() {
 	}
 }
 
+// handleRuleConnection handles a rule-specific WebSocket connection
+func (s *Server) handleRuleConnection(conn *websocket.Conn, clientIP string, authMsg *protocol.Message) {
+	ruleAuth, err := protocol.DecodeRuleAuthPayload(authMsg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode rule auth payload: %v", err)
+		s.sendRuleAuthResponse(conn, false, "", "Invalid payload")
+		return
+	}
+
+	// Validate token
+	if !s.validateToken(ruleAuth.Token) {
+		log.Printf("Invalid token for rule connection from %s", clientIP)
+		s.sendRuleAuthResponse(conn, false, ruleAuth.RuleID, "Invalid token")
+		return
+	}
+
+	// Find the agent
+	agent := s.GetAgent(ruleAuth.AgentID)
+	if agent == nil {
+		log.Printf("Agent %s not found for rule connection", ruleAuth.AgentID)
+		s.sendRuleAuthResponse(conn, false, ruleAuth.RuleID, "Agent not found")
+		return
+	}
+
+	// Register rule connection
+	ruleConn := &RuleConn{
+		RuleID: ruleAuth.RuleID,
+		Conn:   conn,
+	}
+
+	agent.ruleConnsMu.Lock()
+	// Close existing rule connection if any
+	if existing, ok := agent.ruleConns[ruleAuth.RuleID]; ok {
+		existing.Conn.Close()
+	}
+	agent.ruleConns[ruleAuth.RuleID] = ruleConn
+	agent.ruleConnsMu.Unlock()
+
+	log.Printf("Rule connection established: agent=%s, rule=%s from %s", agent.Name, ruleAuth.RuleID, clientIP)
+
+	// Send success response
+	s.sendRuleAuthResponse(conn, true, ruleAuth.RuleID, "")
+
+	// Reset read deadline
+	conn.SetReadDeadline(time.Time{})
+
+	// Handle messages on this rule connection
+	s.handleRuleMessages(agent, ruleConn)
+
+	// Cleanup on disconnect
+	agent.ruleConnsMu.Lock()
+	delete(agent.ruleConns, ruleAuth.RuleID)
+	agent.ruleConnsMu.Unlock()
+
+	log.Printf("Rule connection closed: agent=%s, rule=%s", agent.Name, ruleAuth.RuleID)
+}
+
+func (s *Server) sendRuleAuthResponse(conn *websocket.Conn, success bool, ruleID, errMsg string) {
+	payload := protocol.EncodeRuleAuthResponsePayload(&protocol.RuleAuthResponsePayload{
+		Success: success,
+		RuleID:  ruleID,
+		Error:   errMsg,
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeRuleAuthResponse, 0, payload)
+	data, _ := msg.Encode()
+	conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// handleRuleMessages handles messages on a rule-specific connection
+func (s *Server) handleRuleMessages(agent *AgentConn, ruleConn *RuleConn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Panic in handleRuleMessages for agent %s rule %s: %v", agent.ID, ruleConn.RuleID, r)
+		}
+	}()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+
+		_, data, err := ruleConn.Conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("Agent %s rule %s read error: %v", agent.ID, ruleConn.RuleID, err)
+			}
+			return
+		}
+
+		agent.RxBytes += int64(len(data))
+
+		msg, err := protocol.DecodeFromBytes(data)
+		if err != nil {
+			log.Printf("Failed to decode message from agent %s rule %s: %v", agent.ID, ruleConn.RuleID, err)
+			continue
+		}
+
+		// Handle messages same as main connection, but they are isolated to this rule
+		switch msg.Type {
+		case protocol.MsgTypeHeartbeat:
+			agent.LastHeartbeat = time.Now()
+			s.sendToRuleConn(ruleConn, protocol.NewHeartbeatAckMessage())
+
+		case protocol.MsgTypeData:
+			s.forwarder.HandleData(agent, msg)
+
+		case protocol.MsgTypeUDPData:
+			s.forwarder.HandleUDPData(agent, msg)
+
+		case protocol.MsgTypeConnectAck:
+			s.forwarder.HandleConnectAck(agent, msg)
+
+		case protocol.MsgTypeClose:
+			s.forwarder.HandleClose(agent, msg)
+
+		case protocol.MsgTypeP2PConnect:
+			go s.forwarder.HandleP2PConnect(agent, msg)
+
+		case protocol.MsgTypeP2PData:
+			s.forwarder.HandleP2PData(agent, msg)
+
+		case protocol.MsgTypeAgentCloudConnect:
+			go s.forwarder.HandleAgentCloudConnect(agent, msg)
+
+		case protocol.MsgTypeAgentCloudData:
+			s.forwarder.HandleAgentCloudData(agent, msg)
+		}
+	}
+}
+
+func (s *Server) sendToRuleConn(ruleConn *RuleConn, msg *protocol.Message) error {
+	if ruleConn == nil || ruleConn.Conn == nil {
+		return fmt.Errorf("rule connection is nil")
+	}
+
+	data, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+
+	ruleConn.writeMu.Lock()
+	defer ruleConn.writeMu.Unlock()
+
+	return ruleConn.Conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
 func generateAgentID() string {
 	return time.Now().Format("20060102150405") + "-" + randomString(8)
 }
@@ -496,4 +707,3 @@ func randomString(n int) string {
 	}
 	return string(b)
 }
-

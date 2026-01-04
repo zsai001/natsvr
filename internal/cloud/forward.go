@@ -45,6 +45,7 @@ type TunnelConn struct {
 	Target        string
 	SourceAgentID string // For P2P tunnels, the source agent ID
 	LocalTunnelID uint32 // For P2P tunnels, the source agent's local tunnel ID
+	RuleID        string // The rule this tunnel belongs to (for per-rule connection)
 }
 
 // NewForwarder creates a new forwarder
@@ -276,7 +277,11 @@ func (f *Forwarder) handleRemoteTCPConnection(state *ForwardRuleState, conn net.
 	}
 
 	rule := state.Rule
-	agent := f.server.GetAgent(rule.TargetAgentID)
+	// Try to find target agent by name first, then by ID
+	agent := f.server.GetAgentByName(rule.TargetAgentID)
+	if agent == nil {
+		agent = f.server.GetAgent(rule.TargetAgentID)
+	}
 	if agent == nil {
 		log.Printf("Target agent %s not connected", rule.TargetAgentID)
 		return
@@ -297,9 +302,9 @@ func (f *Forwarder) handleRemoteTCPConnection(state *ForwardRuleState, conn net.
 		f.pendingMu.Unlock()
 	}()
 
-	// Send connect request to agent
+	// Send connect request to agent via rule-specific connection
 	connectMsg := protocol.NewConnectMessage(tunnelID, "tcp", rule.TargetHost, uint16(rule.TargetPort))
-	if err := f.server.sendToAgent(agent, connectMsg); err != nil {
+	if err := f.server.sendToAgentRule(agent, rule.ID, connectMsg); err != nil {
 		log.Printf("Failed to send connect message: %v", err)
 		return
 	}
@@ -323,6 +328,7 @@ func (f *Forwarder) handleRemoteTCPConnection(state *ForwardRuleState, conn net.
 		Conn:     conn,
 		Protocol: "tcp",
 		Target:   fmt.Sprintf("%s:%d", rule.TargetHost, rule.TargetPort),
+		RuleID:   rule.ID,
 	}
 
 	f.tunnelConnMu.Lock()
@@ -350,8 +356,8 @@ func (f *Forwarder) handleRemoteTCPConnection(state *ForwardRuleState, conn net.
 		agent.ActiveTunnels--
 		agent.tunnelsMu.Unlock()
 
-		// Send close message
-		f.server.sendToAgent(agent, protocol.NewCloseMessage(tunnelID))
+		// Send close message via rule-specific connection
+		f.server.sendToAgentRule(agent, rule.ID, protocol.NewCloseMessage(tunnelID))
 	}()
 
 	// Forward data from client to agent
@@ -375,7 +381,8 @@ func (f *Forwarder) handleRemoteTCPConnection(state *ForwardRuleState, conn net.
 			}
 
 			dataMsg := protocol.NewDataMessage(tunnelID, buf[:n])
-			if err := f.server.sendToAgent(agent, dataMsg); err != nil {
+			// Use rule-specific connection for data transfer
+			if err := f.server.sendToAgentRule(agent, rule.ID, dataMsg); err != nil {
 				return
 			}
 		}
@@ -394,7 +401,11 @@ func (f *Forwarder) handleRemoteUDPListener(state *ForwardRuleState) {
 			continue
 		}
 
-		agent := f.server.GetAgent(rule.TargetAgentID)
+		// Try to find target agent by name first, then by ID
+		agent := f.server.GetAgentByName(rule.TargetAgentID)
+		if agent == nil {
+			agent = f.server.GetAgent(rule.TargetAgentID)
+		}
 		if agent == nil {
 			continue
 		}

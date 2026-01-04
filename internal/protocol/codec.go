@@ -835,3 +835,124 @@ func DecodeAgentCloudConnectPayload(data []byte) (*AgentCloudConnectPayload, err
 	}, nil
 }
 
+// EncodeRuleAuthPayload encodes a rule auth payload
+func EncodeRuleAuthPayload(p *RuleAuthPayload) []byte {
+	tokenBytes := []byte(p.Token)
+	agentIDBytes := []byte(p.AgentID)
+	ruleIDBytes := []byte(p.RuleID)
+
+	buf := make([]byte, 6+len(tokenBytes)+len(agentIDBytes)+len(ruleIDBytes))
+
+	offset := 0
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(tokenBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(tokenBytes)], tokenBytes)
+	offset += len(tokenBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(agentIDBytes)))
+	offset += 2
+	copy(buf[offset:offset+len(agentIDBytes)], agentIDBytes)
+	offset += len(agentIDBytes)
+
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(ruleIDBytes)))
+	offset += 2
+	copy(buf[offset:], ruleIDBytes)
+
+	return buf
+}
+
+// DecodeRuleAuthPayload decodes a rule auth payload
+func DecodeRuleAuthPayload(data []byte) (*RuleAuthPayload, error) {
+	if len(data) < 6 {
+		return nil, ErrInvalidPayload
+	}
+
+	offset := 0
+
+	tokenLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(tokenLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	token := string(data[offset : offset+int(tokenLen)])
+	offset += int(tokenLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	agentIDLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(agentIDLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	agentID := string(data[offset : offset+int(agentIDLen)])
+	offset += int(agentIDLen)
+
+	if offset+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	ruleIDLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+	if offset+int(ruleIDLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	ruleID := string(data[offset : offset+int(ruleIDLen)])
+
+	return &RuleAuthPayload{
+		Token:   token,
+		AgentID: agentID,
+		RuleID:  ruleID,
+	}, nil
+}
+
+// EncodeRuleAuthResponsePayload encodes a rule auth response payload
+func EncodeRuleAuthResponsePayload(p *RuleAuthResponsePayload) []byte {
+	ruleIDBytes := []byte(p.RuleID)
+	errBytes := []byte(p.Error)
+
+	buf := make([]byte, 5+len(ruleIDBytes)+len(errBytes))
+
+	if p.Success {
+		buf[0] = 1
+	} else {
+		buf[0] = 0
+	}
+
+	binary.BigEndian.PutUint16(buf[1:3], uint16(len(ruleIDBytes)))
+	copy(buf[3:3+len(ruleIDBytes)], ruleIDBytes)
+
+	offset := 3 + len(ruleIDBytes)
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(errBytes)))
+	copy(buf[offset+2:], errBytes)
+
+	return buf
+}
+
+// DecodeRuleAuthResponsePayload decodes a rule auth response payload
+func DecodeRuleAuthResponsePayload(data []byte) (*RuleAuthResponsePayload, error) {
+	if len(data) < 5 {
+		return nil, ErrInvalidPayload
+	}
+
+	success := data[0] == 1
+
+	ruleIDLen := binary.BigEndian.Uint16(data[1:3])
+	if 3+int(ruleIDLen)+2 > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	ruleID := string(data[3 : 3+ruleIDLen])
+
+	offset := 3 + int(ruleIDLen)
+	errLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	if offset+2+int(errLen) > len(data) {
+		return nil, ErrInvalidPayload
+	}
+	errMsg := string(data[offset+2 : offset+2+int(errLen)])
+
+	return &RuleAuthResponsePayload{
+		Success: success,
+		RuleID:  ruleID,
+		Error:   errMsg,
+	}, nil
+}
+

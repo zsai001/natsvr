@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ type Config struct {
 type Client struct {
 	config            *Config
 	agentID           string
-	conn              *websocket.Conn
+	conn              *websocket.Conn // Main control connection
 	connMu            sync.Mutex
 	tunnels           map[uint32]*TunnelHandler
 	tunnelsMu         sync.RWMutex
@@ -33,6 +34,21 @@ type Client struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	connected         bool
+	// Rule-specific connections (per-rule isolation)
+	ruleConns   map[string]*RuleConnection // ruleID -> connection
+	ruleConnsMu sync.RWMutex
+}
+
+// RuleConnection represents a rule-specific WebSocket connection
+type RuleConnection struct {
+	RuleID    string
+	Conn      *websocket.Conn
+	connMu    sync.Mutex
+	tunnels   map[uint32]*TunnelHandler // Tunnels on this rule connection
+	tunnelsMu sync.RWMutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	connected bool
 }
 
 // TunnelHandler handles a single tunnel
@@ -61,6 +77,7 @@ func NewClient(cfg *Config) (*Client, error) {
 		tunnels:           make(map[uint32]*TunnelHandler),
 		localProxies:      make(map[string]*P2PProxy),
 		agentCloudProxies: make(map[string]*AgentCloudProxy),
+		ruleConns:         make(map[string]*RuleConnection),
 		ctx:               ctx,
 		cancel:            cancel,
 	}, nil
@@ -115,6 +132,7 @@ func (c *Client) Shutdown() {
 	c.cleanupTunnels()
 	c.cleanupLocalProxies()
 	c.cleanupAgentCloudProxies()
+	c.cleanupRuleConnections()
 }
 
 func (c *Client) connect() error {
@@ -438,6 +456,336 @@ func (c *Client) heartbeat() {
 	}
 }
 
+// ConnectRuleConnection establishes a dedicated connection for a rule
+func (c *Client) ConnectRuleConnection(ruleID string) (*RuleConnection, error) {
+	c.ruleConnsMu.Lock()
+	// Check if already connected
+	if existing, ok := c.ruleConns[ruleID]; ok && existing.connected {
+		c.ruleConnsMu.Unlock()
+		return existing, nil
+	}
+	c.ruleConnsMu.Unlock()
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	conn, _, err := dialer.Dial(c.config.ServerURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Send rule auth
+	payload := protocol.EncodeRuleAuthPayload(&protocol.RuleAuthPayload{
+		Token:   c.config.Token,
+		AgentID: c.agentID,
+		RuleID:  ruleID,
+	})
+	authMsg := protocol.NewMessage(protocol.MsgTypeRuleAuth, 0, payload)
+	data, err := authMsg.Encode()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	// Wait for auth response
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_, respData, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	msg, err := protocol.DecodeFromBytes(respData)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	if msg.Type != protocol.MsgTypeRuleAuthResponse {
+		conn.Close()
+		return nil, fmt.Errorf("expected RuleAuthResponse, got %v", msg.Type)
+	}
+
+	authResp, err := protocol.DecodeRuleAuthResponsePayload(msg.Payload)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	if !authResp.Success {
+		conn.Close()
+		return nil, fmt.Errorf("rule auth failed: %s", authResp.Error)
+	}
+
+	ctx, cancel := context.WithCancel(c.ctx)
+	ruleConn := &RuleConnection{
+		RuleID:    ruleID,
+		Conn:      conn,
+		tunnels:   make(map[uint32]*TunnelHandler),
+		ctx:       ctx,
+		cancel:    cancel,
+		connected: true,
+	}
+
+	c.ruleConnsMu.Lock()
+	// Close existing if any
+	if existing, ok := c.ruleConns[ruleID]; ok {
+		existing.Close()
+	}
+	c.ruleConns[ruleID] = ruleConn
+	c.ruleConnsMu.Unlock()
+
+	log.Printf("Rule connection established: %s", ruleID)
+
+	// Start message handler for this rule connection
+	go c.handleRuleMessages(ruleConn)
+
+	return ruleConn, nil
+}
+
+// handleRuleMessages handles messages on a rule-specific connection
+func (c *Client) handleRuleMessages(rc *RuleConnection) {
+	defer func() {
+		rc.connected = false
+		rc.Conn.Close()
+		c.ruleConnsMu.Lock()
+		delete(c.ruleConns, rc.RuleID)
+		c.ruleConnsMu.Unlock()
+		log.Printf("Rule connection closed: %s", rc.RuleID)
+	}()
+
+	for {
+		select {
+		case <-rc.ctx.Done():
+			return
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+
+		rc.connMu.Lock()
+		conn := rc.Conn
+		rc.connMu.Unlock()
+
+		if conn == nil {
+			return
+		}
+
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("Rule %s read error: %v", rc.RuleID, err)
+			}
+			return
+		}
+
+		msg, err := protocol.DecodeFromBytes(data)
+		if err != nil {
+			log.Printf("Failed to decode message on rule %s: %v", rc.RuleID, err)
+			continue
+		}
+
+		switch msg.Type {
+		case protocol.MsgTypeHeartbeatAck:
+			// Heartbeat acknowledged
+
+		case protocol.MsgTypeConnect:
+			go c.handleRuleConnect(rc, msg)
+
+		case protocol.MsgTypeData:
+			c.handleRuleData(rc, msg)
+
+		case protocol.MsgTypeUDPData:
+			c.handleRuleUDPData(rc, msg)
+
+		case protocol.MsgTypeClose:
+			c.handleRuleClose(rc, msg)
+		}
+	}
+}
+
+// handleRuleConnect handles connect request on rule connection
+func (c *Client) handleRuleConnect(rc *RuleConnection, msg *protocol.Message) {
+	payload, err := protocol.DecodeConnectPayload(msg.Payload)
+	if err != nil {
+		log.Printf("Failed to decode connect payload on rule %s: %v", rc.RuleID, err)
+		c.sendRuleConnectAck(rc, msg.TunnelID, false, "Invalid payload")
+		return
+	}
+
+	log.Printf("Rule %s tunnel connect: tunnelID=%d, protocol=%s, target=%s:%d",
+		rc.RuleID, msg.TunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
+
+	var processor TunnelProcessor
+	switch payload.Protocol {
+	case "tcp":
+		processor = NewRuleTCPTunnel(c, rc, msg.TunnelID, payload.TargetHost, payload.TargetPort)
+	case "udp":
+		processor = NewRuleUDPTunnel(c, rc, msg.TunnelID, payload.TargetHost, payload.TargetPort)
+	default:
+		c.sendRuleConnectAck(rc, msg.TunnelID, false, "Unknown protocol")
+		return
+	}
+
+	if err := processor.Start(); err != nil {
+		log.Printf("Rule %s tunnel %d: failed to connect: %v", rc.RuleID, msg.TunnelID, err)
+		c.sendRuleConnectAck(rc, msg.TunnelID, false, err.Error())
+		return
+	}
+
+	handler := &TunnelHandler{
+		ID:         msg.TunnelID,
+		Protocol:   payload.Protocol,
+		TargetHost: payload.TargetHost,
+		TargetPort: payload.TargetPort,
+		handler:    processor,
+	}
+
+	rc.tunnelsMu.Lock()
+	rc.tunnels[msg.TunnelID] = handler
+	rc.tunnelsMu.Unlock()
+
+	c.sendRuleConnectAck(rc, msg.TunnelID, true, "")
+	log.Printf("Rule %s tunnel %d established: %s -> %s:%d",
+		rc.RuleID, msg.TunnelID, payload.Protocol, payload.TargetHost, payload.TargetPort)
+}
+
+func (c *Client) handleRuleData(rc *RuleConnection, msg *protocol.Message) {
+	rc.tunnelsMu.RLock()
+	handler, exists := rc.tunnels[msg.TunnelID]
+	rc.tunnelsMu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	if err := handler.handler.HandleData(msg.Payload); err != nil {
+		log.Printf("Rule %s tunnel %d: handle data error: %v", rc.RuleID, msg.TunnelID, err)
+		c.closeRuleTunnel(rc, msg.TunnelID)
+	}
+}
+
+func (c *Client) handleRuleUDPData(rc *RuleConnection, msg *protocol.Message) {
+	payload, err := protocol.DecodeUDPDataPayload(msg.Payload)
+	if err != nil {
+		return
+	}
+
+	rc.tunnelsMu.RLock()
+	handler, exists := rc.tunnels[msg.TunnelID]
+	rc.tunnelsMu.RUnlock()
+
+	if !exists || handler.Protocol != "udp" {
+		return
+	}
+
+	if udpTunnel, ok := handler.handler.(*RuleUDPTunnel); ok {
+		udpTunnel.HandleUDPData(payload)
+	}
+}
+
+func (c *Client) handleRuleClose(rc *RuleConnection, msg *protocol.Message) {
+	c.closeRuleTunnel(rc, msg.TunnelID)
+}
+
+func (c *Client) closeRuleTunnel(rc *RuleConnection, tunnelID uint32) {
+	rc.tunnelsMu.Lock()
+	handler, exists := rc.tunnels[tunnelID]
+	if exists {
+		handler.handler.Stop()
+		delete(rc.tunnels, tunnelID)
+	}
+	rc.tunnelsMu.Unlock()
+
+	if exists {
+		log.Printf("Rule %s tunnel %d closed", rc.RuleID, tunnelID)
+	}
+}
+
+func (c *Client) sendRuleConnectAck(rc *RuleConnection, tunnelID uint32, success bool, errMsg string) {
+	payload := protocol.EncodeConnectAckPayload(&protocol.ConnectAckPayload{
+		Success:  success,
+		TunnelID: tunnelID,
+		Error:    errMsg,
+	})
+	msg := protocol.NewMessage(protocol.MsgTypeConnectAck, tunnelID, payload)
+	c.sendRuleMessage(rc, msg)
+}
+
+func (c *Client) sendRuleMessage(rc *RuleConnection, msg *protocol.Message) error {
+	data, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+
+	rc.connMu.Lock()
+	defer rc.connMu.Unlock()
+
+	if rc.Conn == nil {
+		return fmt.Errorf("rule connection is nil")
+	}
+
+	return rc.Conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+// SendRuleData sends data on a rule connection
+func (c *Client) SendRuleData(rc *RuleConnection, tunnelID uint32, data []byte) error {
+	msg := protocol.NewDataMessage(tunnelID, data)
+	return c.sendRuleMessage(rc, msg)
+}
+
+// SendRuleClose sends close message on a rule connection
+func (c *Client) SendRuleClose(rc *RuleConnection, tunnelID uint32) error {
+	msg := protocol.NewCloseMessage(tunnelID)
+	return c.sendRuleMessage(rc, msg)
+}
+
+// Close closes a rule connection
+func (rc *RuleConnection) Close() {
+	rc.cancel()
+	rc.connMu.Lock()
+	if rc.Conn != nil {
+		rc.Conn.Close()
+	}
+	rc.connMu.Unlock()
+
+	// Close all tunnels
+	rc.tunnelsMu.Lock()
+	for id, handler := range rc.tunnels {
+		handler.handler.Stop()
+		delete(rc.tunnels, id)
+	}
+	rc.tunnelsMu.Unlock()
+}
+
+// GetRuleConnection gets or creates a rule connection
+func (c *Client) GetRuleConnection(ruleID string) *RuleConnection {
+	c.ruleConnsMu.RLock()
+	rc, exists := c.ruleConns[ruleID]
+	c.ruleConnsMu.RUnlock()
+
+	if exists && rc.connected {
+		return rc
+	}
+	return nil
+}
+
+// cleanupRuleConnections cleans up all rule connections
+func (c *Client) cleanupRuleConnections() {
+	c.ruleConnsMu.Lock()
+	for id, rc := range c.ruleConns {
+		rc.Close()
+		delete(c.ruleConns, id)
+	}
+	c.ruleConnsMu.Unlock()
+}
+
 func (c *Client) handleLocalProxyStart(msg *protocol.Message) {
 	payload, err := protocol.DecodeLocalProxyStartPayload(msg.Payload)
 	if err != nil {
@@ -455,6 +803,16 @@ func (c *Client) handleLocalProxyStart(msg *protocol.Message) {
 		return
 	}
 	c.localProxyMu.Unlock()
+
+	// Establish dedicated rule connection
+	ruleConn, err := c.ConnectRuleConnection(payload.RuleID)
+	if err != nil {
+		log.Printf("Failed to establish rule connection for %s: %v", payload.RuleID, err)
+		// Continue anyway, will use main connection as fallback
+	} else {
+		log.Printf("Rule connection established for %s", payload.RuleID)
+		_ = ruleConn // ruleConn is stored in c.ruleConns and used by proxy
+	}
 
 	proxy := NewP2PProxy(c, payload.RuleID, int(payload.ListenPort), payload.TargetAgentID, payload.TargetHost, int(payload.TargetPort), payload.Protocol)
 	if err := proxy.Start(); err != nil {
@@ -483,6 +841,14 @@ func (c *Client) handleLocalProxyStop(msg *protocol.Message) {
 		delete(c.localProxies, payload.RuleID)
 	}
 	c.localProxyMu.Unlock()
+
+	// Close rule connection
+	c.ruleConnsMu.Lock()
+	if rc, ok := c.ruleConns[payload.RuleID]; ok {
+		rc.Close()
+		delete(c.ruleConns, payload.RuleID)
+	}
+	c.ruleConnsMu.Unlock()
 
 	if exists {
 		log.Printf("Local proxy %s stopped", payload.RuleID)
@@ -543,6 +909,16 @@ func (c *Client) handleAgentCloudProxyStart(msg *protocol.Message) {
 	}
 	c.agentCloudProxyMu.Unlock()
 
+	// Establish dedicated rule connection
+	ruleConn, err := c.ConnectRuleConnection(payload.RuleID)
+	if err != nil {
+		log.Printf("Failed to establish rule connection for %s: %v", payload.RuleID, err)
+		// Continue anyway, will use main connection as fallback
+	} else {
+		log.Printf("Rule connection established for %s", payload.RuleID)
+		_ = ruleConn // ruleConn is stored in c.ruleConns and used by proxy
+	}
+
 	proxy := NewAgentCloudProxy(c, payload.RuleID, int(payload.ListenPort), payload.TargetHost, int(payload.TargetPort), payload.Protocol)
 	if err := proxy.Start(); err != nil {
 		log.Printf("Failed to start agent-cloud proxy %s: %v", payload.RuleID, err)
@@ -570,6 +946,14 @@ func (c *Client) handleAgentCloudProxyStop(msg *protocol.Message) {
 		delete(c.agentCloudProxies, payload.RuleID)
 	}
 	c.agentCloudProxyMu.Unlock()
+
+	// Close rule connection
+	c.ruleConnsMu.Lock()
+	if rc, ok := c.ruleConns[payload.RuleID]; ok {
+		rc.Close()
+		delete(c.ruleConns, payload.RuleID)
+	}
+	c.ruleConnsMu.Unlock()
 
 	if exists {
 		log.Printf("Agent-cloud proxy %s stopped", payload.RuleID)

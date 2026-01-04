@@ -36,35 +36,35 @@
     --radius: 0.5rem;
   }
 
-  /* Dark mode */
+  /* Dark mode - Tokyo City 霓虹城市风格 */
   .dark {
-    --background: 222 47% 6%;
-    --foreground: 210 40% 98%;
+    --background: 225 25% 14%;     /* #1e2030 深蓝紫背景 */
+    --foreground: 220 15% 78%;    /* #c0c5d0 柔和灰白文字 */
 
-    --card: 222 47% 8%;
-    --card-foreground: 210 40% 98%;
+    --card: 225 25% 17%;          /* #262a3d 卡片背景 */
+    --card-foreground: 220 15% 78%;
 
-    --popover: 222 47% 8%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 225 25% 17%;
+    --popover-foreground: 220 15% 78%;
 
-    --primary: 142 76% 46%;
-    --primary-foreground: 222 47% 6%;
+    --primary: 186 100% 50%;      /* #00d4ff 霓虹青色 */
+    --primary-foreground: 225 25% 10%;
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 225 25% 22%;     /* 次要背景 */
+    --secondary-foreground: 220 15% 78%;
 
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
+    --muted: 225 25% 22%;
+    --muted-foreground: 220 15% 55%; /* 暗淡文字 */
 
-    --accent: 262 83% 58%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 326 100% 60%;       /* #ff3399 霓虹粉色 */
+    --accent-foreground: 225 25% 10%;
 
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 85% 60%;     /* #f04040 亮红 */
+    --destructive-foreground: 220 15% 95%;
 
-    --border: 217 33% 17%;
-    --input: 217 33% 17%;
-    --ring: 142 76% 46%;
+    --border: 225 25% 25%;        /* 边框 */
+    --input: 225 25% 25%;
+    --ring: 186 100% 50%;         /* 青色聚焦环 */
   }
 }
 
@@ -148,10 +148,10 @@
 
 /* Glow effect */
 .glow-primary {
-  box-shadow: 0 0 20px rgba(34, 197, 94, 0.3);
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
 }
 
 .glow-accent {
-  box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+  box-shadow: 0 0 20px rgba(255, 51, 153, 0.4);
 }
 

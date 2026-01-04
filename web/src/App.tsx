@@ -25,9 +25,9 @@ function App() {
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-500/10 border border-green-500/20">
-                <Activity className="w-3 h-3 text-green-500 dark:text-green-400 animate-pulse-glow" />
-                <span className="text-xs text-green-600 dark:text-green-400 font-medium">系统运行中</span>
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 dark:bg-teal-400/10 border border-emerald-500/20 dark:border-teal-400/20">
+                <Activity className="w-3 h-3 text-emerald-500 dark:text-teal-400 animate-pulse-glow" />
+                <span className="text-xs text-emerald-600 dark:text-teal-400 font-medium">系统运行中</span>
               </div>
               <Button
                 variant="ghost"
