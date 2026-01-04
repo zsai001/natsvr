@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/natsvr/natsvr/pkg/version"
 )
 
 // API response types
@@ -365,5 +366,10 @@ func (s *Server) handleDeleteToken(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Token deleted"})
+}
+
+// Version endpoint
+func (s *Server) handleGetVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, version.Get())
 }
 

@@ -37,19 +37,29 @@ jobs:
       - name: Build Binaries
         run: |
           mkdir -p bin
+          
+          # Version info
+          VERSION=${GITHUB_REF_NAME}
+          COMMIT=${GITHUB_SHA::7}
+          BRANCH=${GITHUB_REF_NAME}
+          BUILD_TIME=$(TZ=Asia/Shanghai date '+%Y/%m/%d %H:%M:%S')
+          
+          # ldflags for version injection
+          LDFLAGS="-s -w -X 'github.com/natsvr/natsvr/pkg/version.Version=${VERSION}' -X 'github.com/natsvr/natsvr/pkg/version.Commit=${COMMIT}' -X 'github.com/natsvr/natsvr/pkg/version.Branch=${BRANCH}' -X 'github.com/natsvr/natsvr/pkg/version.BuildTime=${BUILD_TIME}'"
+          
           # Linux
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-cloud-linux-amd64 ./cmd/cloud
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/natsvr-cloud-linux-arm64 ./cmd/cloud
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-agent-linux-amd64 ./cmd/agent
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/natsvr-agent-linux-arm64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-cloud-linux-amd64 ./cmd/cloud
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-cloud-linux-arm64 ./cmd/cloud
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-agent-linux-amd64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-agent-linux-arm64 ./cmd/agent
           # Windows
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-cloud-windows-amd64.exe ./cmd/cloud
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-agent-windows-amd64.exe ./cmd/agent
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-cloud-windows-amd64.exe ./cmd/cloud
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-agent-windows-amd64.exe ./cmd/agent
           # macOS
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-cloud-darwin-amd64 ./cmd/cloud
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o bin/natsvr-cloud-darwin-arm64 ./cmd/cloud
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/natsvr-agent-darwin-amd64 ./cmd/agent
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o bin/natsvr-agent-darwin-arm64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-cloud-darwin-amd64 ./cmd/cloud
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-cloud-darwin-arm64 ./cmd/cloud
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-agent-darwin-amd64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o bin/natsvr-agent-darwin-arm64 ./cmd/agent
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

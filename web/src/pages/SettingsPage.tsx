@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/api/client'
-import { Copy, Plus, Trash2, Key, RefreshCw } from 'lucide-react'
+import { Copy, Plus, Trash2, Key, RefreshCw, Info } from 'lucide-react'
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
@@ -16,6 +16,12 @@ export function SettingsPage() {
   const { data: tokens, isLoading } = useQuery({
     queryKey: ['tokens'],
     queryFn: api.getTokens,
+  })
+
+  const { data: version } = useQuery({
+    queryKey: ['version'],
+    queryFn: api.getVersion,
+    staleTime: Infinity, // Version doesn't change during runtime
   })
 
   const createMutation = useMutation({
@@ -132,25 +138,42 @@ export function SettingsPage() {
       {/* Server Info */}
       <Card className="bg-card/50 border-border/50">
         <CardHeader>
-          <CardTitle className="text-lg">服务器信息</CardTitle>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Info className="w-5 h-5" />
+            服务器信息
+          </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label className="text-muted-foreground">版本</Label>
-              <p className="font-mono">1.0.0</p>
+          <div className="space-y-4">
+            {/* Version Info Row */}
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge variant="outline" className="font-mono">
+                Version: {version?.version || 'dev'}
+              </Badge>
+              <span className="text-muted-foreground">•</span>
+              <span className="text-muted-foreground font-mono">
+                Commit: {version?.commit || 'unknown'}
+              </span>
+              <span className="text-muted-foreground">•</span>
+              <span className="text-muted-foreground font-mono">
+                Branch: {version?.branch || 'unknown'}
+              </span>
+              <span className="text-muted-foreground">•</span>
+              <span className="text-muted-foreground font-mono">
+                Built: {version?.buildTime || 'unknown'}
+              </span>
             </div>
-            <div>
-              <Label className="text-muted-foreground">运行时间</Label>
-              <p className="font-mono">-</p>
-            </div>
-            <div>
-              <Label className="text-muted-foreground">WebSocket 端点</Label>
-              <p className="font-mono text-sm">/ws</p>
-            </div>
-            <div>
-              <Label className="text-muted-foreground">API 端点</Label>
-              <p className="font-mono text-sm">/api</p>
+            
+            {/* Endpoints */}
+            <div className="grid grid-cols-2 gap-4 pt-2 border-t border-border/50">
+              <div>
+                <Label className="text-muted-foreground">WebSocket 端点</Label>
+                <p className="font-mono text-sm">/ws</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground">API 端点</Label>
+                <p className="font-mono text-sm">/api</p>
+              </div>
             </div>
           </div>
         </CardContent>

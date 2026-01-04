@@ -55,6 +55,13 @@ export interface Token {
   createdAt: string
 }
 
+export interface Version {
+  version: string
+  commit: string
+  branch: string
+  buildTime: string
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -73,6 +80,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // Version
+  getVersion: () => request<Version>('/version'),
+  
   // Stats
   getStats: () => request<Stats>('/stats'),
   

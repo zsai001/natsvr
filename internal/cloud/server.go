@@ -113,6 +113,7 @@ func (s *Server) setupRouter() {
 	// API endpoints
 	api := r.Group("/api")
 	{
+		api.GET("/version", s.handleGetVersion)
 		api.GET("/stats", s.handleGetStats)
 		
 		api.GET("/agents", s.handleGetAgents)
